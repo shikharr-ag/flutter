@@ -8,6 +8,7 @@ import 'package:file_testing/file_testing.dart';
 import 'package:flutter_tools/src/artifacts.dart';
 import 'package:flutter_tools/src/base/file_system.dart';
 import 'package:flutter_tools/src/base/logger.dart';
+import 'package:flutter_tools/src/base/platform.dart';
 import 'package:flutter_tools/src/build_info.dart';
 import 'package:flutter_tools/src/build_system/build_system.dart';
 import 'package:flutter_tools/src/features.dart';
@@ -34,7 +35,7 @@ void main() {
     processManager = FakeProcessManager.empty();
     logger = BufferLogger.test();
     artifacts = Artifacts.test();
-    fileSystem = MemoryFileSystem.test();
+    fileSystem = MemoryFileSystem.test(style: FileSystemStyle.windows);
     environment = Environment.test(
       fileSystem.currentDirectory,
       inputs: <String, String>{},
@@ -215,10 +216,7 @@ void main() {
       isNot(contains('package:bar/bar.dart')),
     );
     expect(
-      environment.projectDir
-          .childDirectory('build')
-          .childDirectory('native_assets')
-          .childDirectory('windows'),
+      environment.projectDir.childDirectory('build').childDirectory('native_assets').childDirectory('windows'),
       exists,
     );
   });
@@ -232,8 +230,7 @@ void main() {
       FeatureFlags: () => TestFeatureFlags(isNativeAssetsEnabled: true),
       ProcessManager: () => FakeProcessManager.empty(),
     }, () async {
-      final File packageConfig =
-          environment.projectDir.childDirectory('.dart_tool').childFile('package_config.json');
+      final File packageConfig = environment.projectDir.childDirectory('.dart_tool').childFile('package_config.json');
       await packageConfig.parent.create();
       await packageConfig.create();
       final File dylibAfterCompiling = fileSystem.file('bar.dll');
@@ -271,7 +268,7 @@ void main() {
           'package:bar/bar.dart',
           if (flutterTester)
             // Tests run on host system, so the have the full path on the system.
-            '- ${projectUri.resolve('/build/native_assets/windows/bar.dll').toFilePath()}'
+            '- ${projectUri.resolve('build/native_assets/windows/bar.dll').toFilePath()}'
           else
             // Apps are a bundle with the dylibs on their dlopen path.
             '- bar.dll',
@@ -314,5 +311,106 @@ void main() {
             'For more info see https://github.com/dart-lang/sdk/issues/49418.',
       ),
     );
+  });
+
+  // This logic is mocked in the other tests to avoid having test order
+  // randomization causing issues with what processes are invoked.
+  // Exercise the parsing of the process output in this separate test.
+  testUsingContext('NativeAssetsBuildRunnerImpl.cCompilerConfig', overrides: <Type, Generator>{
+    FeatureFlags: () => TestFeatureFlags(isNativeAssetsEnabled: true),
+    ProcessManager: () => FakeProcessManager.list(
+          <FakeCommand>[
+            FakeCommand(
+              command: <Pattern>[
+                RegExp(r'(.*)vswhere.exe'),
+                '-format',
+                'json',
+                '-products',
+                '*',
+                '-utf8',
+                '-latest',
+                '-version',
+                '16',
+                '-requires',
+                'Microsoft.VisualStudio.Workload.NativeDesktop',
+                'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
+                'Microsoft.VisualStudio.Component.VC.CMake.Project',
+              ],
+              stdout: r'''
+[
+  {
+    "instanceId": "491ec752",
+    "installDate": "2023-04-21T08:17:11Z",
+    "installationName": "VisualStudio/17.5.4+33530.505",
+    "installationPath": "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community",
+    "installationVersion": "17.5.33530.505",
+    "productId": "Microsoft.VisualStudio.Product.Community",
+    "productPath": "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\Common7\\IDE\\devenv.exe",
+    "state": 4294967295,
+    "isComplete": true,
+    "isLaunchable": true,
+    "isPrerelease": false,
+    "isRebootRequired": false,
+    "displayName": "Visual Studio Community 2022",
+    "description": "Powerful IDE, free for students, open-source contributors, and individuals",
+    "channelId": "VisualStudio.17.Release",
+    "channelUri": "https://aka.ms/vs/17/release/channel",
+    "enginePath": "C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\resources\\app\\ServiceHub\\Services\\Microsoft.VisualStudio.Setup.Service",
+    "installedChannelId": "VisualStudio.17.Release",
+    "installedChannelUri": "https://aka.ms/vs/17/release/channel",
+    "releaseNotes": "https://docs.microsoft.com/en-us/visualstudio/releases/2022/release-notes-v17.5#17.5.4",
+    "thirdPartyNotices": "https://go.microsoft.com/fwlink/?LinkId=661288",
+    "updateDate": "2023-04-21T08:17:11.2249473Z",
+    "catalog": {
+      "buildBranch": "d17.5",
+      "buildVersion": "17.5.33530.505",
+      "id": "VisualStudio/17.5.4+33530.505",
+      "localBuild": "build-lab",
+      "manifestName": "VisualStudio",
+      "manifestType": "installer",
+      "productDisplayVersion": "17.5.4",
+      "productLine": "Dev17",
+      "productLineVersion": "2022",
+      "productMilestone": "RTW",
+      "productMilestoneIsPreRelease": "False",
+      "productName": "Visual Studio",
+      "productPatchVersion": "4",
+      "productPreReleaseMilestoneSuffix": "1.0",
+      "productSemanticVersion": "17.5.4+33530.505",
+      "requiredEngineVersion": "3.5.2150.18781"
+    },
+    "properties": {
+      "campaignId": "2060:abb99c5d1ecc4013acf2e1814b10b690",
+      "channelManifestId": "VisualStudio.17.Release/17.5.4+33530.505",
+      "nickname": "",
+      "setupEngineFilePath": "C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\setup.exe"
+    }
+  }
+]
+''', // Newline at the end of the string.
+            )
+          ],
+        ),
+    FileSystem: () => fileSystem,
+  }, () async {
+    if (!const LocalPlatform().isWindows) {
+      return;
+    }
+
+    final Directory msvcBinDir =
+        fileSystem.directory(r'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.35.32215\bin\Hostx64\x64');
+    await msvcBinDir.create(recursive: true);
+
+    final NativeAssetsBuildRunner runner = NativeAssetsBuildRunnerImpl(
+      projectUri,
+      fileSystem,
+      logger,
+    );
+    final CCompilerConfig result = await runner.cCompilerConfig;
+    expect(result.cc?.toFilePath(), msvcBinDir.childFile('cl.exe').uri.toFilePath());
+    expect(result.ar?.toFilePath(), msvcBinDir.childFile('lib.exe').uri.toFilePath());
+    expect(result.ld?.toFilePath(), msvcBinDir.childFile('link.exe').uri.toFilePath());
+    expect(result.envScript, isNotNull);
+    expect(result.envScriptArgs, isNotNull);
   });
 }
