@@ -28,9 +28,13 @@
   "cutButtonLabel": "Wytnij",
   "copyButtonLabel": "Kopiuj",
   "pasteButtonLabel": "Wklej",
-  "selectAllButtonLabel": "Wybierz wszystkie",
+  "selectAllButtonLabel": "Zaznacz wszystko",
   "tabSemanticsLabel": "Karta $tabIndex z $tabCount",
   "modalBarrierDismissLabel": "Zamknij",
   "searchTextFieldPlaceholderLabel": "Szukaj",
+<<<<<<< HEAD
   "noSpellCheckReplacementsLabel": "No Replacements Found"
+=======
+  "noSpellCheckReplacementsLabel": "Nie znaleziono zastąpień"
+>>>>>>> 367f9ea16bfae1ca451b9cc27c1366870b187ae2
 }
