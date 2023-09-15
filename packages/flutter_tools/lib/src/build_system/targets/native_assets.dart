@@ -10,7 +10,6 @@ import '../../base/file_system.dart';
 import '../../base/platform.dart';
 import '../../build_info.dart';
 import '../../ios/native_assets.dart';
-import '../../linux/native_assets.dart';
 import '../../macos/native_assets.dart';
 import '../../macos/xcode.dart';
 import '../../native_assets.dart';

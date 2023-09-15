@@ -16,7 +16,6 @@ import '../bundle.dart';
 import '../compile.dart';
 import '../flutter_plugins.dart';
 import '../globals.dart' as globals;
-import '../linux/native_assets.dart';
 import '../macos/native_assets.dart';
 import '../native_assets.dart';
 import '../project.dart';

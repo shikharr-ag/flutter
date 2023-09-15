@@ -22,6 +22,7 @@ import 'linux/native_assets.dart';
 import 'macos/native_assets.dart';
 import 'macos/native_assets_host.dart';
 import 'resident_runner.dart';
+import 'windows/native_assets.dart';
 
 /// Programmatic API to be used by Dart launchers to invoke native builds.
 ///
@@ -417,4 +418,204 @@ Future<Uri?> dryRunNativeAssetsMultipeOSes({
 Uri buildUriMultiple(Uri projectUri) {
   final String buildDir = build_info.getBuildDirectory();
   return projectUri.resolve('$buildDir/native_assets/multiple/');
+}
+
+
+/// Dry run the native builds.
+///
+/// This does not build native assets, it only simulates what the final paths
+/// of all assets will be so that this can be embedded in the kernel file.
+Future<Uri?> dryRunNativeAssetsLinuxWindows({
+  required NativeAssetsBuildRunner buildRunner,
+  required Uri projectUri,
+  bool flutterTester = false,
+  required FileSystem fileSystem,
+  required OS os,
+}) async {
+  if (await hasNoPackageConfig(buildRunner) || await isDisabledAndNoNativeAssets(buildRunner)) {
+    return null;
+  }
+
+  final Uri buildUri_ = nativeAssetsBuildUri(projectUri, os);
+  final Iterable<Asset> nativeAssetPaths = await dryRunNativeAssetsLinuxWindowsInternal(
+    fileSystem,
+    projectUri,
+    flutterTester,
+    buildRunner,
+  );
+  final Uri nativeAssetsUri = await writeNativeAssetsYaml(
+    nativeAssetPaths,
+    buildUri_,
+    fileSystem,
+  );
+  return nativeAssetsUri;
+}
+
+Future<Iterable<Asset>> dryRunNativeAssetsLinuxWindowsInternal(
+  FileSystem fileSystem,
+  Uri projectUri,
+  bool flutterTester,
+  NativeAssetsBuildRunner buildRunner,
+) async {
+  const OS targetOs = OS.linux;
+  final Uri buildUri_ = nativeAssetsBuildUri(projectUri, targetOs);
+
+  globals.logger.printTrace('Dry running native assets for $targetOs.');
+  final List<Asset> nativeAssets = (await buildRunner.dryRun(
+    linkModePreference: LinkModePreference.dynamic,
+    targetOs: targetOs,
+    workingDirectory: projectUri,
+    includeParentEnvironment: true,
+  ))
+      .assets;
+  ensureNoLinkModeStatic(nativeAssets);
+  globals.logger.printTrace('Dry running native assets for $targetOs done.');
+  final Uri? absolutePath = flutterTester ? buildUri_ : null;
+  final Map<Asset, Asset> assetTargetLocations =
+      _assetTargetLocationsLinuxWindows(nativeAssets, absolutePath);
+  final Iterable<Asset> nativeAssetPaths = assetTargetLocations.values;
+  return nativeAssetPaths;
+}
+
+/// Builds native assets.
+///
+/// If [targetPlatform] is omitted, the current target architecture is used.
+///
+/// If [flutterTester] is true, absolute paths are emitted in the native
+/// assets mapping. This can be used for JIT mode without sandbox on the host.
+/// This is used in `flutter test` and `flutter run -d flutter-tester`.
+Future<(Uri? nativeAssetsYaml, List<Uri> dependencies)> buildNativeAssetsLinuxWindows({
+  required NativeAssetsBuildRunner buildRunner,
+  build_info.TargetPlatform? targetPlatform,
+  required Uri projectUri,
+  required build_info.BuildMode buildMode,
+  bool flutterTester = false,
+  Uri? yamlParentDirectory,
+  required FileSystem fileSystem,
+}) async {
+  final Target target =
+      targetPlatform != null ? _getNativeTargetLinuxWindows(targetPlatform) : Target.current;
+  final OS targetOs = target.os;
+  final Uri buildUri_ = nativeAssetsBuildUri(projectUri, targetOs);
+  final Directory buildDir = fileSystem.directory(buildUri_);
+  if (!await buildDir.exists()) {
+    // CMake requires the folder to exist to do copying.
+    await buildDir.create(recursive: true);
+  }
+  if (await hasNoPackageConfig(buildRunner) || await isDisabledAndNoNativeAssets(buildRunner)) {
+    final Uri nativeAssetsYaml =
+        await writeNativeAssetsYaml(<Asset>[], yamlParentDirectory ?? buildUri_, fileSystem);
+    return (nativeAssetsYaml, <Uri>[]);
+  }
+
+  final BuildMode buildModeCli = nativeAssetsBuildMode(buildMode);
+
+  globals.logger.printTrace('Building native assets for $target $buildModeCli.');
+  final native_assets_builder.BuildResult result = await buildRunner.build(
+    linkModePreference: LinkModePreference.dynamic,
+    target: target,
+    buildMode: buildModeCli,
+    workingDirectory: projectUri,
+    includeParentEnvironment: true,
+    cCompilerConfig: await buildRunner.cCompilerConfig,
+  );
+  final List<Asset> nativeAssets = result.assets;
+  final Set<Uri> dependencies = result.dependencies.toSet();
+  ensureNoLinkModeStatic(nativeAssets);
+  globals.logger.printTrace('Building native assets for $target done.');
+  final Uri? absolutePath = flutterTester ? buildUri_ : null;
+  final Map<Asset, Asset> assetTargetLocations =
+      _assetTargetLocationsLinuxWindows(nativeAssets, absolutePath);
+  await _copyNativeAssetsLinuxWindows(
+    buildUri_,
+    assetTargetLocations,
+    buildMode,
+    fileSystem,
+  );
+  final Uri nativeAssetsUri = await writeNativeAssetsYaml(
+    assetTargetLocations.values,
+    yamlParentDirectory ?? buildUri_,
+    fileSystem,
+  );
+  return (nativeAssetsUri, dependencies.toList());
+}
+
+Map<Asset, Asset> _assetTargetLocationsLinuxWindows(
+  List<Asset> nativeAssets,
+  Uri? absolutePath,
+) =>
+    <Asset, Asset>{
+      for (final Asset asset in nativeAssets)
+        asset: _targetLocationLinuxWindows(asset, absolutePath),
+    };
+
+Asset _targetLocationLinuxWindows(Asset asset, Uri? absolutePath) {
+  final AssetPath path = asset.path;
+  switch (path) {
+    case AssetSystemPath _:
+    case AssetInExecutable _:
+    case AssetInProcess _:
+      return asset;
+    case AssetAbsolutePath _:
+      final String fileName = path.uri.pathSegments.last;
+      Uri uri;
+      if (absolutePath != null) {
+        // Flutter tester needs full host paths.
+        uri = absolutePath.resolve(fileName);
+      } else {
+        // Flutter Desktop needs "absolute" paths inside the app.
+        // "relative" in the context of native assets would be relative to the
+        // kernel or aot snapshot.
+        uri = Uri(path: fileName);
+      }
+      return asset.copyWith(path: AssetAbsolutePath(uri));
+  }
+  throw Exception('Unsupported asset path type ${path.runtimeType} in asset $asset');
+}
+
+/// Extract the [Target] from a [TargetPlatform].
+Target _getNativeTargetLinuxWindows(build_info.TargetPlatform targetPlatform) {
+  switch (targetPlatform) {
+    case build_info.TargetPlatform.linux_x64:
+      return Target.linuxX64;
+    case build_info.TargetPlatform.linux_arm64:
+      return Target.linuxArm64;
+    case build_info.TargetPlatform.windows_x64:
+      return Target.windowsX64;
+    case build_info.TargetPlatform.android:
+    case build_info.TargetPlatform.ios:
+    case build_info.TargetPlatform.darwin:
+    case build_info.TargetPlatform.fuchsia_arm64:
+    case build_info.TargetPlatform.fuchsia_x64:
+    case build_info.TargetPlatform.tester:
+    case build_info.TargetPlatform.web_javascript:
+    case build_info.TargetPlatform.android_arm:
+    case build_info.TargetPlatform.android_arm64:
+    case build_info.TargetPlatform.android_x64:
+    case build_info.TargetPlatform.android_x86:
+      throw Exception('Unknown targetPlatform: $targetPlatform.');
+  }
+}
+
+Future<void> _copyNativeAssetsLinuxWindows(
+  Uri buildUri,
+  Map<Asset, Asset> assetTargetLocations,
+  build_info.BuildMode buildMode,
+  FileSystem fileSystem,
+) async {
+  if (assetTargetLocations.isNotEmpty) {
+    globals.logger.printTrace('Copying native assets to ${buildUri.toFilePath()}.');
+    final Directory buildDir = fileSystem.directory(buildUri.toFilePath());
+    if (!buildDir.existsSync()) {
+      buildDir.createSync(recursive: true);
+    }
+    for (final MapEntry<Asset, Asset> assetMapping in assetTargetLocations.entries) {
+      final Uri source = (assetMapping.key.path as AssetAbsolutePath).uri;
+      final Uri target = (assetMapping.value.path as AssetAbsolutePath).uri;
+      final Uri targetUri = buildUri.resolveUri(target);
+      final String targetFullPath = targetUri.toFilePath();
+      await fileSystem.file(source).copy(targetFullPath);
+    }
+    globals.logger.printTrace('Copying native assets done.');
+  }
 }
